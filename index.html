@@ -118,7 +118,6 @@
   thead th{
     background:var(--orange);
     color:var(--navy);
-    text-align:center;
     padding:10px 14px;
     font-size:.85rem;
     letter-spacing:.5px;
@@ -137,7 +136,7 @@
     background:transparent;
     font-size:.9rem;
     color:var(--navy);
-    text-align:center;
+    
   }
   .totals{
     padding:18px 24px;
@@ -275,7 +274,7 @@
 // One-time setup (done once by the developer, not by each shop):
 // Paste your Google Cloud OAuth Client ID here. See SETUP_GUIDE.md
 // ============================================================
-const CLIENT_ID = "50983816826-0vhjff793nmc3psj5ib15epai1mnf48t.apps.googleusercontent.com";
+const CLIENT_ID = "50983816826-0vhjff793nmc3psj5ib15epai1mnf48t.apps.googleusercontent.com"; // replaced automatically at deploy time from the GOOGLE_CLIENT_ID repo secret
 
 const SCOPES = [
   "https://www.googleapis.com/auth/spreadsheets",
@@ -297,6 +296,7 @@ let tokenClient = null;
 let accessToken = null;
 let userEmail = null;
 let pendingAction = null; // used to auto-run Save right after connecting
+let silentAttemptInProgress = false; // true while trying to auto-restore the connection on load
 
 const statusMsg = document.getElementById("statusMsg");
 const connectBtn = document.getElementById("connectBtn");
@@ -317,9 +317,13 @@ function initGIS(){
     scope: SCOPES,
     callback: async (resp) => {
       if (resp.error){
-        setStatus("Connect failed: " + resp.error, "err");
+        if (!silentAttemptInProgress){
+          setStatus("Connect failed: " + resp.error, "err");
+        }
+        silentAttemptInProgress = false;
         return;
       }
+      silentAttemptInProgress = false;
       accessToken = resp.access_token;
       await loadUserEmail();
       connectBtn.textContent = "Reconnect";
@@ -332,6 +336,12 @@ function initGIS(){
       }
     }
   });
+
+  // Try to silently restore the connection on every page load/refresh —
+  // no popup shown if the browser still has an active Google session and
+  // the user already granted access before. Fails quietly on first-ever visit.
+  silentAttemptInProgress = true;
+  tokenClient.requestAccessToken({ prompt: "" });
 }
 window.addEventListener("load", initGIS);
 
@@ -543,8 +553,8 @@ function collectData(){
 
 // ---------- Save & Set Reminder ----------
 document.getElementById("saveBtn").addEventListener("click", () => {
-  if (CLIENT_ID.indexOf("PASTE_YOUR") === 0){
-    setStatus("OAuth Client ID abhi set nahi hui. SETUP_GUIDE.md dekhein.", "err");
+  if (CLIENT_ID.indexOf("__GOOGLE_CLIENT_ID__") === 0){
+    setStatus("OAuth Client ID abhi set nahi hui — GitHub Actions deploy hone ka intezar karein ya SETUP_GUIDE.md dekhein.", "err");
     return;
   }
   ensureConnected(runSave);
