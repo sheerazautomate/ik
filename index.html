@@ -219,7 +219,14 @@
     border-radius:0 !important;
     box-shadow:none !important;
   }
-  /* keep buttons/status out of the capture (stage only, not the live page) */
+  /* Keep on-screen UI chrome (buttons, status line) out of the capture —
+     stage only, the live page still shows them.
+     NOTE: this must NOT rely on #statusMsg alone: buildPdfStage() strips every
+     id from the clone before html2canvas sees it, and setStatus() rewrites the
+     status element's className, so only [data-pdf-exclude] is dependable.
+     The nodes are also removed outright in buildPdfStage(); this is the
+     belt-and-braces fallback. */
+  .pdf-stage [data-pdf-exclude],
   .pdf-stage .actions,
   .pdf-stage #statusMsg{
     display:none !important;
@@ -250,7 +257,7 @@
 
   @media print{
     body{background:#fff;}
-    .actions,#statusMsg,.topbar{display:none !important;}
+    .actions,#statusMsg,.topbar,[data-pdf-exclude]{display:none !important;}
     .sheet{box-shadow:none;margin:0;max-width:100%;}
     .field, .signature{border-bottom:1px solid #999;}
     input{color:#000 !important;}
@@ -317,9 +324,10 @@
 
   <div class="signature"><label>Signature:</label></div>
 
-  <div id="statusMsg"></div>
+  <!-- data-pdf-exclude = never rendered into the exported PDF / printout -->
+  <div id="statusMsg" data-pdf-exclude></div>
 
-  <div class="actions">
+  <div class="actions" data-pdf-exclude>
     <button id="saveBtn">Save &amp; Set Reminder</button>
     <button id="pdfBtn">Save as PDF</button>
     <button id="printBtn">Print</button>
@@ -556,6 +564,12 @@ function buildPdfStage(billNo){
   stage.className = "pdf-stage";
   stage.style.width = PDF_STAGE_WIDTH + "px"; // inline, so no viewport rule can squeeze it
   const clone = document.querySelector(".sheet").cloneNode(true);
+  // Drop the on-screen UI chrome from the printed copy *before* ids are
+  // stripped below: buttons and the status line (which reads
+  // "Generating PDF..." at exactly this moment) must never end up inside the
+  // exported file. Removing the nodes beats hiding them with CSS, because the
+  // id-based hide rule stops matching once the clone loses its ids.
+  clone.querySelectorAll("[data-pdf-exclude], .actions, #statusMsg").forEach(el => el.remove());
   clone.style.setProperty("width", PDF_STAGE_WIDTH + "px", "important");
   clone.style.setProperty("max-width", "none", "important");
   clone.removeAttribute("id");
@@ -594,6 +608,9 @@ async function captureBillCanvas(billNo){
       useCORS: true,
       backgroundColor: "#ffffff",
       logging: false,
+      // last line of defence: even if some UI chrome survives into the stage,
+      // html2canvas must skip it rather than draw it into the bill
+      ignoreElements: (el) => !!(el && el.getAttribute && el.getAttribute("data-pdf-exclude") !== null),
       // make the clone resolve viewport-based CSS as a desktop screen
       windowWidth: 1280,
       windowHeight: 900
