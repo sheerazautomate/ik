@@ -184,6 +184,7 @@
   }
   button:disabled{opacity:.6;cursor:not-allowed;}
   #saveBtn{background:var(--navy);color:#fff;}
+  #pdfBtn{background:#1a7a3c;color:#fff;}
   #printBtn{background:var(--orange);color:var(--navy);}
   #newBtn{background:#eee;color:var(--navy);}
   #statusMsg{
@@ -276,6 +277,7 @@
 
   <div class="actions">
     <button id="saveBtn">Save &amp; Set Reminder</button>
+    <button id="pdfBtn">Save to PDF</button>
     <button id="printBtn">Print</button>
     <button id="newBtn">New Bill</button>
   </div>
@@ -630,6 +632,37 @@ async function runSave(){
     saveBtn.disabled = false;
   }
 }
+
+// ---------- Save to PDF (local download, no Google connection needed) ----------
+document.getElementById("pdfBtn").addEventListener("click", async () => {
+  const pdfBtn = document.getElementById("pdfBtn");
+  pdfBtn.disabled = true;
+  try{
+    setStatus("Generating PDF...", "working");
+    const data = collectData();
+    const pdfBlob = await generatePdfBlob();
+
+    const d = new Date();
+    const pad = (n) => String(n).padStart(2, "0");
+    const stamp = d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()) + "_" + pad(d.getHours()) + "-" + pad(d.getMinutes());
+    const filename = "Bill_" + (data.customerName || "Customer").replace(/[^a-z0-9]/gi, "_") + "_" + stamp + ".pdf";
+
+    const url = URL.createObjectURL(pdfBlob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+
+    setStatus("PDF saved: " + filename, "ok");
+  }catch(err){
+    setStatus("PDF save failed: " + err, "err");
+  }finally{
+    pdfBtn.disabled = false;
+  }
+});
 
 document.getElementById("printBtn").addEventListener("click", () => window.print());
 
