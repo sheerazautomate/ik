@@ -197,11 +197,55 @@
   #statusMsg.err{color:#b3261e;}
   #statusMsg.working{color:#946200;}
 
-  /* used only while html2canvas captures the bill, so buttons/status don't appear in the PDF */
-  body.capturing .actions,
-  body.capturing #statusMsg,
-  body.capturing .topbar{
+  /* ------------------------------------------------------------------
+     PDF rendering stage.
+     The bill is cloned into this off-screen, fixed 820px-wide container and
+     html2canvas captures the clone instead of the live page. That way a phone
+     produces exactly the same desktop, full-width PDF as a laptop — the live
+     page keeps its responsive (mobile) layout and is never touched.
+     ------------------------------------------------------------------ */
+  .pdf-stage{
+    position:fixed;
+    top:0;
+    left:-10000px;
+    width:820px;
+    background:#fff;
+    pointer-events:none;
+  }
+  .pdf-stage .sheet{
+    width:820px !important;
+    max-width:none !important;
+    margin:0 !important;
+    border-radius:0 !important;
+    box-shadow:none !important;
+  }
+  /* keep buttons/status out of the capture (stage only, not the live page) */
+  .pdf-stage .actions,
+  .pdf-stage #statusMsg{
     display:none !important;
+  }
+  .pdf-stage .bill-no-line{
+    grid-column:1 / -1;
+    display:flex;
+    justify-content:flex-end;
+    align-items:center;
+    gap:6px;
+    font-size:.95rem;
+    font-weight:700;
+    letter-spacing:.3px;
+    color:var(--navy);
+    padding:0 0 2px;
+  }
+  /* on a phone the mobile media query still applies to the whole document,
+     so re-assert the desktop rules inside the stage */
+  @media (max-width:600px){
+    .pdf-stage .meta{
+      grid-template-columns:1fr 1fr !important;
+      gap:10px 24px !important;
+      padding:16px 24px 18px !important;
+    }
+    .pdf-stage .brand-bar{ padding:20px 24px 10px !important; }
+    .pdf-stage .totals{ padding:22px 24px !important; }
   }
 
   @media print{
@@ -277,7 +321,7 @@
 
   <div class="actions">
     <button id="saveBtn">Save &amp; Set Reminder</button>
-    <button id="pdfBtn">Save to PDF</button>
+    <button id="pdfBtn">Save as PDF</button>
     <button id="printBtn">Print</button>
     <button id="newBtn">New Bill</button>
   </div>
@@ -501,16 +545,110 @@ async function createCalendarEvent(data, billNo){
   return res.json();
 }
 
-async function generatePdfBlob(){
-  document.body.classList.add("capturing");
-  const el = document.querySelector(".sheet");
-  const canvas = await html2canvas(el, { scale: 2, useCORS: true });
-  document.body.classList.remove("capturing");
+// ---------- PDF rendering ----------
+// The bill is cloned into an off-screen 820px "stage" and that clone is
+// captured, so the PDF is always the desktop/full-page layout regardless of
+// the device it was generated on.
+const PDF_STAGE_WIDTH = 820; // same max-width as .sheet on desktop
+
+function buildPdfStage(billNo){
+  const stage = document.createElement("div");
+  stage.className = "pdf-stage";
+  stage.style.width = PDF_STAGE_WIDTH + "px"; // inline, so no viewport rule can squeeze it
+  const clone = document.querySelector(".sheet").cloneNode(true);
+  clone.style.setProperty("width", PDF_STAGE_WIDTH + "px", "important");
+  clone.style.setProperty("max-width", "none", "important");
+  clone.removeAttribute("id");
+  // strip ids so the clone can never shadow the live form for getElementById
+  clone.querySelectorAll("[id]").forEach(el => el.removeAttribute("id"));
+  // cloneNode does not carry over the *current* value of <input> elements
+  const live = document.querySelectorAll(".sheet input");
+  const copy = clone.querySelectorAll("input");
+  for (let i = 0; i < copy.length; i++){
+    if (!live[i]) continue;
+    if (live[i].type === "checkbox" || live[i].type === "radio") copy[i].checked = live[i].checked;
+    else copy[i].value = live[i].value;
+  }
+  // stamp the bill number onto the printed copy (only when one is known)
+  if (billNo !== undefined && billNo !== null && billNo !== ""){
+    const meta = clone.querySelector(".meta");
+    const line = document.createElement("div");
+    line.className = "bill-no-line";
+    line.textContent = "Bill No: " + billNo;
+    if (meta) meta.insertBefore(line, meta.firstElementChild);
+    else clone.appendChild(line);
+  }
+  stage.appendChild(clone);
+  document.body.appendChild(stage);
+  return stage;
+}
+
+async function captureBillCanvas(billNo){
+  if (typeof html2canvas !== "function" || !window.jspdf || !window.jspdf.jsPDF){
+    throw new Error("PDF library (html2canvas / jsPDF) could not load — check the internet connection and reload");
+  }
+  const stage = buildPdfStage(billNo);
+  try{
+    const canvas = await html2canvas(stage.firstElementChild, {
+      scale: 2,
+      useCORS: true,
+      backgroundColor: "#ffffff",
+      logging: false,
+      // make the clone resolve viewport-based CSS as a desktop screen
+      windowWidth: 1280,
+      windowHeight: 900
+    });
+    if (!canvas || !canvas.width || !canvas.height){
+      throw new Error("bill came out empty — please try once more");
+    }
+    return canvas;
+  }finally{
+    stage.remove();
+  }
+}
+
+// Fit the captured bill onto A4 pages at full page width (splits over
+// several pages instead of cropping if a bill is very long).
+function canvasToPdfBlob(canvas){
+  const pdf = new window.jspdf.jsPDF({
+    unit: "mm",
+    format: "a4",
+    orientation: "portrait",
+    compress: true
+  });
   const imgData = canvas.toDataURL("image/png");
-  const jsPDFCtor = window.jspdf.jsPDF;
-  const pdf = new jsPDFCtor({ unit: "px", format: [canvas.width, canvas.height] });
-  pdf.addImage(imgData, "PNG", 0, 0, canvas.width, canvas.height);
+  const pageW = pdf.internal.pageSize.getWidth();
+  const pageH = pdf.internal.pageSize.getHeight();
+  const margin = 6;
+  const usableW = pageW - margin * 2;
+  const usableH = pageH - margin * 2;
+  let imgW = usableW;
+  let imgH = canvas.height * (imgW / canvas.width);
+
+  // A slightly-too-tall bill is scaled down to stay on one page (a bill is a
+  // single document); anything longer than that flows onto extra pages.
+  if (imgH > usableH && imgH <= usableH * 1.35){
+    const k = usableH / imgH;
+    imgW *= k;
+    imgH = usableH;
+  }
+  const left = margin + (usableW - imgW) / 2;
+
+  let drawn = 0;
+  let offset = 0;
+  while (drawn < imgH){
+    if (drawn > 0) pdf.addPage();
+    // shift the image up by one page worth of mm each time; viewers clip to the page box
+    pdf.addImage(imgData, "PNG", left, margin - offset, imgW, imgH, undefined, "FAST");
+    drawn += usableH;
+    offset += usableH;
+  }
   return pdf.output("blob");
+}
+
+async function generatePdfBlob(billNo){
+  const canvas = await captureBillCanvas(billNo);
+  return canvasToPdfBlob(canvas);
 }
 
 // ---------- Bill items table ----------
@@ -607,7 +745,7 @@ async function runSave(){
     }
 
     setStatus("Generating PDF...", "working");
-    const pdfBlob = await generatePdfBlob();
+    const pdfBlob = await generatePdfBlob(rowNum ? billNo : "");
     const filename = "Bill_" + billNo + "_" + (data.customerName || "Customer").replace(/[^a-z0-9]/gi, "_") + ".pdf";
 
     setStatus("Uploading PDF to Drive (" + FOLDER_NAME + ")...", "working");
@@ -633,30 +771,48 @@ async function runSave(){
   }
 }
 
-// ---------- Save to PDF (local download, no Google connection needed) ----------
+// ---------- Save as PDF (local download, no Google connection needed) ----------
+// Local bills keep their own running number in localStorage so the downloaded
+// file names match the "Bill_<no>_<customer>.pdf" pattern used on Drive.
+const LOCAL_BILL_NO_KEY = "ironKingLocalBillNo";
+
+function peekLocalBillNo(){
+  const saved = parseInt(localStorage.getItem(LOCAL_BILL_NO_KEY) || "0", 10);
+  return (isNaN(saved) ? 0 : saved) + 1;
+}
+
+function commitLocalBillNo(n){
+  try{ localStorage.setItem(LOCAL_BILL_NO_KEY, String(n)); }catch(err){ /* private mode */ }
+}
+
 document.getElementById("pdfBtn").addEventListener("click", async () => {
   const pdfBtn = document.getElementById("pdfBtn");
+  if (pdfBtn.disabled) return;
   pdfBtn.disabled = true;
+  const billNo = peekLocalBillNo();
   try{
     setStatus("Generating PDF...", "working");
     const data = collectData();
-    const pdfBlob = await generatePdfBlob();
+    const pdfBlob = await generatePdfBlob(billNo);
 
-    const d = new Date();
-    const pad = (n) => String(n).padStart(2, "0");
-    const stamp = d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()) + "_" + pad(d.getHours()) + "-" + pad(d.getMinutes());
-    const filename = "Bill_" + (data.customerName || "Customer").replace(/[^a-z0-9]/gi, "_") + "_" + stamp + ".pdf";
+    const filename = "Bill_" + billNo + "_" + (data.customerName || "Customer").replace(/[^a-z0-9]/gi, "_") + ".pdf";
 
     const url = URL.createObjectURL(pdfBlob);
     const a = document.createElement("a");
     a.href = url;
     a.download = filename;
+    if (typeof a.download === "undefined"){
+      // old iOS Safari: no download attribute — open the PDF so it can be shared/saved
+      a.target = "_blank";
+      a.rel = "noopener";
+    }
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
-    setTimeout(() => URL.revokeObjectURL(url), 5000);
+    setTimeout(() => URL.revokeObjectURL(url), 30000);
 
-    setStatus("PDF saved: " + filename, "ok");
+    commitLocalBillNo(billNo);
+    setStatus("PDF saved to your device: " + filename + "\n(only the file is saved — no Google Sheet, Drive upload or reminder)", "ok");
   }catch(err){
     setStatus("PDF save failed: " + err, "err");
   }finally{
